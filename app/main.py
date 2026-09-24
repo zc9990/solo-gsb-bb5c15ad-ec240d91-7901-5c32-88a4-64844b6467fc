@@ -17,6 +17,7 @@ from .matcher import candidate_to_dict, match_address, result_to_dict
 from .schemas import (
     AddressBatchIn,
     BatchMatchRequest,
+    ExperimentCompareRequest,
     ExperimentRequest,
     GroupReviewAction,
     MatchRequest,
@@ -80,12 +81,13 @@ def _custom_openapi() -> dict[str, Any]:
         routes=app.routes,
     )
     components = schema.setdefault("components", {}).setdefault("schemas", {})
-    full = ExperimentRequest.model_json_schema(
-        ref_template="#/components/schemas/{model}"
-    )
-    # Nested models (RuleProfile) land in $defs; hoist them next to the others.
-    components.update(full.pop("$defs", {}))
-    components["ExperimentRequest"] = full
+    for model in (ExperimentRequest, ExperimentCompareRequest):
+        full = model.model_json_schema(
+            ref_template="#/components/schemas/{model}"
+        )
+        # Nested models (RuleProfile) land in $defs; hoist them next to the others.
+        components.update(full.pop("$defs", {}))
+        components[model.__name__] = full
     app.openapi_schema = schema
     return schema
 
@@ -457,6 +459,41 @@ def list_experiments(limit: int = 50, offset: int = 0,
         "total": db.count_ab_experiments(conn),
         "items": [experiments.serialize_experiment_summary(r) for r in rows],
     }
+
+
+@app.post(
+    "/api/experiments/compare",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/ExperimentCompareRequest"}
+                }
+            },
+        },
+    },
+)
+def compare_experiment(payload: Any = Body(...),
+                       conn: db.sqlite3.Connection = Depends(get_conn)
+                       ) -> dict[str, Any]:
+    """历史回归对比：选择两次已持久化的实验逐档比较。
+
+    服务端按**档案名称**与**去首尾空白后的查询**对齐两次实验；档案缺失
+    （两次实验档案集合不一致）或任一实验存在重复查询时逐项报错并拒绝对比。
+    对齐成功的每个「查询 × 档案」单元按状态 / 首选地址 / 得分变化分类为
+    改善、退化、仅分数变化、无变化并汇总计数；地址表快照 digest 不同时
+    标记为不可直接比较，但仍返回全部逐条差异。对比是纯推导，不写库。
+    """
+    try:
+        return experiments.compare_experiments(conn, payload)
+    except experiments.ExperimentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except experiments.ExperimentValidationError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "对比请求校验失败", "errors": exc.errors},
+        )
 
 
 @app.get("/api/experiments/{experiment_id}")

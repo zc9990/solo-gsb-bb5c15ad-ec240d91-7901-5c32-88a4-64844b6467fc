@@ -67,9 +67,31 @@
             <h2>历史实验</h2>
             <div class="row">
                 <button id="btn-ab-refresh-history" class="ghost">刷新历史</button>
-                <span class="hint">点击编号回看完整结果</span>
+                <span class="hint">点击编号回看完整结果；「→基准 / →对比」可直接填入下方回归对比</span>
             </div>
             <div id="ab-history"></div>
+        </div>
+        <div class="card" id="cmp-card">
+            <h2>历史回归对比</h2>
+            <p class="hint">
+                选择两次已持久化的实验，服务端按<b>档案名称</b>与<b>去首尾空白后的查询</b>逐档对齐，
+                比较状态 / 首选地址 / 得分变化并分类为 改善 / 退化 / 仅分数变化 / 无变化。
+                档案缺失或查询重复的实验会被拒绝对比；地址表快照 digest 不同时提示不可直接比较，但仍展示逐条差异。
+            </p>
+            <div class="row wrap cmp-selectors">
+                <label class="cmp-sel">
+                    <span>基准实验（旧）</span>
+                    <select id="cmp-base"></select>
+                </label>
+                <button id="btn-cmp-swap" class="ghost" title="交换基准与对比实验">⇄ 交换</button>
+                <label class="cmp-sel">
+                    <span>对比实验（新）</span>
+                    <select id="cmp-target"></select>
+                </label>
+                <button id="btn-cmp-run" class="primary">开始对比</button>
+            </div>
+            <div id="cmp-errors"></div>
+            <div id="cmp-result"></div>
         </div>
     </section>
 

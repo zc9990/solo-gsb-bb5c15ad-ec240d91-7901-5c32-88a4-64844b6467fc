@@ -916,17 +916,22 @@ $("#btn-ab-run").addEventListener("click", submitExperiment);
 
 // -------------------------------------------------------------- history
 
+// Cached history items, also used to fill the regression-compare selectors.
+let abHistoryItems = [];
+
 async function loadExperimentHistory() {
     const box = $("#ab-history");
     if (!box) return;
     try {
         const data = await api("/api/experiments?limit=50");
+        abHistoryItems = data.items;
+        refreshCompareSelects();
         if (data.items.length === 0) {
             box.innerHTML = '<p class="muted">暂无实验记录。</p>';
             return;
         }
         box.innerHTML = `<div class="table-wrap"><table>
-            <thead><tr><th>实验编号</th><th>提交时间</th><th>档案</th><th>查询</th><th>不一致</th></tr></thead>
+            <thead><tr><th>实验编号</th><th>提交时间</th><th>档案</th><th>查询</th><th>不一致</th><th>回归对比</th></tr></thead>
             <tbody>${data.items.map((it) => `<tr>
                 <td><a href="#" class="ab-open" data-id="${escapeHtml(it.id)}">${escapeHtml(it.id)}</a></td>
                 <td>${escapeHtml(it.created_at)}</td>
@@ -935,6 +940,10 @@ async function loadExperimentHistory() {
                 <td>${it.summary.disagreement_count ?
                     `<span class="ab-flag">${it.summary.disagreement_count}</span>` :
                     '<span class="ab-flag agree">0</span>'}</td>
+                <td class="cmp-pick">
+                    <button class="tiny ghost cmp-set" data-role="base" data-id="${escapeHtml(it.id)}">→基准</button>
+                    <button class="tiny ghost cmp-set" data-role="target" data-id="${escapeHtml(it.id)}">→对比</button>
+                </td>
             </tr>`).join("")}</tbody></table></div>
             ${data.total > 50 ? `<p class="muted">共 ${data.total} 个实验，仅显示最近 50 个</p>` : ""}`;
     } catch (err) {
@@ -956,3 +965,255 @@ $("#ab-history").addEventListener("click", async (event) => {
         alert(err.message);
     }
 });
+
+// ====================================== historical regression comparison
+
+const CMP_CATEGORIES = [
+    { key: "improved", label: "改善" },
+    { key: "regressed", label: "退化" },
+    { key: "score_only", label: "仅分数变化" },
+    { key: "unchanged", label: "无变化" },
+];
+const CMP_CATEGORY_LABEL = Object.fromEntries(CMP_CATEGORIES.map((c) => [c.key, c.label]));
+
+// Last comparison response and the active category filter ("all" = no filter).
+let cmpResult = null;
+let cmpFilter = "all";
+
+function cmpOptionLabel(it) {
+    const names = it.profiles.map((p) => p.name).join(" / ");
+    return `${it.id}（${names} · ${it.query_count} 条查询）`;
+}
+
+function refreshCompareSelects() {
+    const baseSel = $("#cmp-base");
+    const targetSel = $("#cmp-target");
+    if (!baseSel || !targetSel) return;
+    const prevBase = baseSel.value;
+    const prevTarget = targetSel.value;
+    const options = abHistoryItems
+        .map((it) => `<option value="${escapeHtml(it.id)}">${escapeHtml(cmpOptionLabel(it))}</option>`)
+        .join("");
+    baseSel.innerHTML = options;
+    targetSel.innerHTML = options;
+    const has = (id) => abHistoryItems.some((it) => it.id === id);
+    // History is newest-first: default to "previous run -> latest run".
+    baseSel.value = has(prevBase) ? prevBase
+        : (abHistoryItems[1] || abHistoryItems[0] || {}).id || "";
+    targetSel.value = has(prevTarget) ? prevTarget
+        : (abHistoryItems[0] || {}).id || "";
+}
+
+$("#ab-history").addEventListener("click", (event) => {
+    const btn = event.target.closest(".cmp-set");
+    if (!btn) return;
+    event.preventDefault();
+    $(btn.dataset.role === "base" ? "#cmp-base" : "#cmp-target").value = btn.dataset.id;
+    $("#cmp-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
+});
+
+$("#btn-cmp-swap").addEventListener("click", () => {
+    const base = $("#cmp-base").value;
+    $("#cmp-base").value = $("#cmp-target").value;
+    $("#cmp-target").value = base;
+});
+
+function renderCompareErrors(errors) {
+    if (!errors || errors.length === 0) {
+        $("#cmp-errors").innerHTML = "";
+        return;
+    }
+    const items = errors.map((e) => {
+        const where = e.type === "profiles" ? "档案对齐"
+            : e.type === "queries" ? "查询对齐"
+                : e.type === "base_id" ? "基准实验"
+                    : e.type === "target_id" ? "对比实验" : "请求";
+        return `<li><b>${escapeHtml(where)}</b>：${escapeHtml(e.message)}</li>`;
+    }).join("");
+    $("#cmp-errors").innerHTML =
+        `<div class="ab-errors"><div class="ab-errors-head">⛔ 校验失败，未执行对比（共 ${errors.length} 项）：</div><ul>${items}</ul></div>`;
+}
+
+function cmpFilteredCells() {
+    if (!cmpResult) return [];
+    if (cmpFilter === "all") return cmpResult.cells;
+    return cmpResult.cells.filter((c) => c.category === cmpFilter);
+}
+
+function cmpCellRow(cell) {
+    const b = cell.base;
+    const t = cell.target;
+    const delta = cell.score_delta;
+    const deltaTxt = delta === null ? "—"
+        : `<span class="${delta === 0 ? "muted" : delta > 0 ? "ab-delta-up" : "ab-delta-down"}">` +
+          `${delta > 0 ? "+" : ""}${pct(delta)}</span>`;
+    return `<tr>
+        <td class="cmp-profile-cell">${escapeHtml(cell.profile)}</td>
+        <td><span class="cmp-cat ${cell.category}">${escapeHtml(cell.category_label)}</span></td>
+        <td><span class="status ${b.status}">${STATUS_LABEL[b.status] || b.status}</span>
+            <span class="muted">#${b.best_id ?? "—"} · ${b.best_score === null ? "—" : pct(b.best_score)}</span></td>
+        <td><span class="status ${t.status}">${STATUS_LABEL[t.status] || t.status}</span>
+            <span class="muted">#${t.best_id ?? "—"} · ${t.best_score === null ? "—" : pct(t.best_score)}</span></td>
+        <td>${deltaTxt}</td>
+        <td class="muted">${escapeHtml(cell.reason)}</td>
+    </tr>`;
+}
+
+function renderCompareCells() {
+    const cells = cmpFilteredCells();
+    if (cells.length === 0) {
+        return '<p class="muted">当前筛选条件下没有差异记录。</p>';
+    }
+    // Cells arrive ordered by (query, profile); group consecutive queries.
+    const groups = [];
+    cells.forEach((cell) => {
+        const last = groups[groups.length - 1];
+        if (last && last.query === cell.query) {
+            last.cells.push(cell);
+        } else {
+            groups.push({ query: cell.query, cells: [cell] });
+        }
+    });
+    return groups.map((g) => `
+        <div class="cmp-query">
+            <div class="query-line">🔍 ${escapeHtml(g.query)}</div>
+            <div class="table-wrap"><table class="cmp-table">
+                <thead><tr><th>档案</th><th>分类</th><th>基准（旧）</th><th>对比（新）</th><th>得分差</th><th>说明</th></tr></thead>
+                <tbody>${g.cells.map(cmpCellRow).join("")}</tbody>
+            </table></div>
+        </div>`).join("");
+}
+
+function renderCompareResult() {
+    const data = cmpResult;
+    if (!data) return;
+    const s = data.summary;
+    const snapWarn = data.snapshot.comparable ? "" : `
+        <div class="cmp-warning">
+            ⚠ ${escapeHtml(data.snapshot.note)}<br>
+            <span class="muted">基准 digest ${escapeHtml(String(data.snapshot.base_digest).slice(0, 12))}…
+            ↔ 对比 digest ${escapeHtml(String(data.snapshot.target_digest).slice(0, 12))}…</span>
+        </div>`;
+    const unpaired = [];
+    if (data.queries.only_in_base.length) {
+        unpaired.push(`仅基准实验有 ${data.queries.only_in_base.length} 条：${data.queries.only_in_base.map((q) => `“${q}”`).join("、")}`);
+    }
+    if (data.queries.only_in_target.length) {
+        unpaired.push(`仅对比实验有 ${data.queries.only_in_target.length} 条：${data.queries.only_in_target.map((q) => `“${q}”`).join("、")}`);
+    }
+    const unpairedNote = unpaired.length
+        ? `<div class="cmp-unpaired">⚠ ${data.queries.common} 条共同查询参与对比；未配对查询不参与统计 —— ${unpaired.map(escapeHtml).join("；")}</div>`
+        : "";
+
+    const filterBtn = (key, label, count) => `
+        <button class="tiny cmp-filter${cmpFilter === key ? " active" : ""}" data-cat="${key}">
+            ${label} ${count}</button>`;
+    const filterBar = `
+        <div class="cmp-filterbar">
+            ${filterBtn("all", "全部", s.total_cells)}
+            ${CMP_CATEGORIES.map((c) => filterBtn(c.key, c.label, s[c.key])).join("")}
+            <span class="cmp-filter-spacer"></span>
+            <button id="btn-cmp-csv" class="tiny ghost">⬇ 下载 CSV（当前筛选）</button>
+        </div>`;
+
+    $("#cmp-result").innerHTML = `
+        <div class="cmp-result-inner">
+            <div class="ab-result-head">
+                <h2>对比结果</h2>
+                <span class="muted">基准 <span class="ab-eid">${escapeHtml(data.base.id)}</span>
+                    （${escapeHtml(data.base.created_at)}） →
+                    对比 <span class="ab-eid">${escapeHtml(data.target.id)}</span>
+                    （${escapeHtml(data.target.created_at)}）</span>
+            </div>
+            <div class="muted">对齐档案 ${data.aligned_profiles.length} 档：${data.aligned_profiles.map(escapeHtml).join(" / ")}
+                · 共同查询 ${data.queries.common} 条 · 共 ${s.total_cells} 个对比单元</div>
+            ${snapWarn}
+            ${unpairedNote}
+            ${filterBar}
+            <div id="cmp-cells">${renderCompareCells()}</div>
+        </div>`;
+}
+
+async function submitComparison() {
+    const baseId = $("#cmp-base").value;
+    const targetId = $("#cmp-target").value;
+    $("#cmp-errors").innerHTML = "";
+    $("#cmp-result").innerHTML = "";
+    cmpResult = null;
+    if (!baseId || !targetId) {
+        renderCompareErrors([{ type: "request", message: "请先在「历史实验」中运行或选择两次实验" }]);
+        return;
+    }
+    const btn = $("#btn-cmp-run");
+    btn.disabled = true;
+    try {
+        const res = await fetch("/api/experiments/compare", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ base_id: baseId, target_id: targetId }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            renderCompareErrors(data.errors || [{ type: "request", message: data.detail || "请求失败" }]);
+            return;
+        }
+        cmpResult = data;
+        cmpFilter = "all";
+        renderCompareResult();
+    } catch (err) {
+        renderCompareErrors([{ type: "request", message: err.message }]);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+$("#btn-cmp-run").addEventListener("click", submitComparison);
+
+// Category filter clicks (delegated: the bar is re-rendered with the result).
+$("#cmp-result").addEventListener("click", (event) => {
+    const filterBtn = event.target.closest(".cmp-filter");
+    if (filterBtn) {
+        cmpFilter = filterBtn.dataset.cat;
+        renderCompareResult();
+        return;
+    }
+    if (event.target.closest("#btn-cmp-csv")) {
+        downloadCompareCsv();
+    }
+});
+
+function csvEscape(value) {
+    const text = value === null || value === undefined ? "" : String(value);
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadCompareCsv() {
+    if (!cmpResult) return;
+    const header = ["查询", "档案", "分类", "基准状态", "基准首选ID", "基准得分",
+        "对比状态", "对比首选ID", "对比得分", "得分差", "说明"];
+    const rows = cmpFilteredCells().map((c) => [
+        c.query,
+        c.profile,
+        CMP_CATEGORY_LABEL[c.category] || c.category,
+        STATUS_LABEL[c.base.status] || c.base.status,
+        c.base.best_id ?? "",
+        c.base.best_score ?? "",
+        STATUS_LABEL[c.target.status] || c.target.status,
+        c.target.best_id ?? "",
+        c.target.best_score ?? "",
+        c.score_delta ?? "",
+        c.reason,
+    ]);
+    // BOM so Excel opens the UTF-8 file with the right encoding.
+    const csv = "﻿" + [header, ...rows]
+        .map((row) => row.map(csvEscape).join(","))
+        .join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `regression_${cmpResult.base.id}_vs_${cmpResult.target.id}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+}

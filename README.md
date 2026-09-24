@@ -8,6 +8,7 @@
 
 - 🌐 网页界面：单条/批量匹配、**规则 A/B 对照实验**、上传标准地址 CSV、待确认队列人工复核（含同案合并复核、复核共识记忆）
 - 🧪 **规则 A/B 对照实验**：提交 2～4 个命名规则档案（自动命中/拒绝/分差阈值 + 词元权重）与 1～100 条查询，在同一地址表快照下逐档运行，逐条对比状态/首选/得分/候选差异并标出不一致与触发阈值，结果按实验编号持久化回看
+- 📈 **历史回归对比**：任选两次已持久化实验，服务端按档案名称与去首尾空白后的查询逐档对齐（缺失档案 / 重复查询直接拒绝），逐单元分类为 改善 / 退化 / 仅分数变化 / 无变化 并汇总；地址表快照 digest 不同时提示不可直接比较但仍展示逐条差异；页面支持按类别筛选与 CSV 下载
 - 🔌 REST API：`/api/match`、`/api/match/batch`、`/api/addresses`、复核接口、A/B 实验接口（含 `/docs` Swagger）
 - 🗄️ SQLite 持久化，零外部依赖，数据通过 Docker volume 保存
 - 🌍 归一化：NFKC + 变音符折叠 + 繁简中文映射 + 全角字符、道路缩写（St/Rd/Ave…）、门牌号（`#12-B`/`No.12b`/`12号`）
@@ -203,6 +204,65 @@ curl -s -X POST http://localhost:8000/api/experiments \
 #      {"type":"query","index":1,"field":null,"message":"查询与第 1 条完全重复：…"}, ...]}
 ```
 
+---
+
+## 历史回归对比
+
+在「规则 A/B 实验」标签页底部的 **「历史回归对比」** 卡片中，从下拉框选择两次已持久化的实验
+（历史实验列表每行也有「→基准 / →对比」快捷按钮），点击「开始对比」即可得到逐档回归报告；
+历史列表刷新后下拉框自动更新，默认选中「次新 → 最新」两次实验。
+
+**对齐规则（服务端强制执行）**：
+
+- **档案按名称对齐**：两次实验的档案集合必须完全一致，任一方缺失档案（如基准有 `P2`
+  而对比没有）会逐项列出并以 `400` 拒绝；档案顺序以基准实验为准；
+- **查询按去首尾空白后的文本对齐**：只有两次实验都存在的查询参与对比；仅一方存在的
+  查询会在结果中单独列出、不计入统计；任一实验内存在（去空白后）重复查询时同样
+  逐项报错并拒绝；
+- 两次实验编号相同、编号不存在分别返回 `400` / `404`；对比是**纯推导**，不写任何表。
+
+**逐单元分类**（每个「查询 × 档案」单元，状态质量按 `no_match < needs_review < auto_matched`
+排序）：
+
+| 分类 | 判定 |
+| --- | --- |
+| 改善 `improved` | 状态上升（如 待确认 → 自动命中） |
+| 退化 `regressed` | 状态下降；或状态相同但**首选地址变化**（无 ground truth，保守计入退化） |
+| 仅分数变化 `score_only` | 状态与首选地址不变，仅首选得分变化 |
+| 无变化 `unchanged` | 状态、首选地址、得分完全一致 |
+
+**快照提示**：两次实验的地址表快照 digest 不同时，结果顶部显示红色警告
+「不可直接比较」（差异可能来自地址表本身的变化），但逐条差异仍完整展示。
+
+**页面功能**：四个分类的汇总计数、按类别筛选（点击筛选按钮只显示该类别）、
+**CSV 下载**（下载当前筛选结果，UTF-8 带 BOM，Excel 可直接打开）。
+
+```bash
+# 对比两次已持久化的实验（编号来自 GET /api/experiments）
+curl -s -X POST http://localhost:8000/api/experiments/compare \
+  -H 'Content-Type: application/json' -d '{
+    "base_id":   "EXP-20260924T075404-358e3e3e",
+    "target_id": "EXP-20260924T081227-9a1c04f0"
+  }'
+# => {"base": {...}, "target": {...}, "aligned_profiles": ["基线A", "激进B"],
+#     "queries": {"common": 3, "only_in_base": [], "only_in_target": []},
+#     "snapshot": {"comparable": true, "base_digest": "…", "target_digest": "…", "note": null},
+#     "summary": {"total_cells": 6, "improved": 1, "regressed": 0,
+#                 "score_only": 2, "unchanged": 3},
+#     "cells": [{"query": "…", "profile": "基线A", "category": "improved",
+#                "category_label": "改善", "reason": "状态改善：待确认 → 自动命中",
+#                "base": {"status": "needs_review", "best_id": 5, "best_score": 0.7864},
+#                "target": {"status": "auto_matched", "best_id": 5, "best_score": 0.7864},
+#                "score_delta": 0.0}, ...]}
+
+# 档案对不齐 -> 400，errors 逐项列出，不执行对比
+curl -s -X POST http://localhost:8000/api/experiments/compare \
+  -H 'Content-Type: application/json' \
+  -d '{"base_id": "EXP-...", "target_id": "EXP-..."}'
+# => {"detail":"对比请求校验失败","errors":[
+#      {"type":"profiles","index":null,"field":null,"message":"对比实验缺少档案：“P2”"}, ...]}
+```
+
 CSV 支持的列名（均可识别别名，表头大小写不敏感）：
 
 | 标准列 | 可识别别名 |
@@ -353,6 +413,7 @@ curl -s -X POST http://localhost:8000/api/review-groups/review \
 | POST | `/api/experiments` | 提交规则 A/B 对照实验（2~4 档案 × 1~100 查询，同一快照逐档运行；非法参数/重复查询逐项报错且不执行） |
 | GET | `/api/experiments` | 历史实验列表（编号、档案、查询数、各档计数与不一致数） |
 | GET | `/api/experiments/{id}` | 按实验编号回看完整结果（档案、查询、快照、逐档结果与候选差异） |
+| POST | `/api/experiments/compare` | 历史回归对比：两次已持久化实验按档案名 + 去空白查询对齐，逐单元分类 改善/退化/仅分数变化/无变化 并汇总；缺失档案/重复查询逐项报错（400），实验不存在 404；快照 digest 不同标记不可直接比较但仍返回逐条差异 |
 | GET | `/api/matches?status=needs_review` | 匹配记录/待确认队列 |
 | GET | `/api/matches/{id}` | 单条匹配详情 |
 | POST | `/api/matches/{id}/review` | 单条复核：confirmed / overridden / rejected |
@@ -399,7 +460,7 @@ curl -s -X POST http://localhost:8000/api/review-groups/review \
 │   ├── db.py              # SQLite 表结构与读写
 │   ├── normalization.py   # Unicode/缩写/门牌号归一化与分词
 │   ├── matcher.py         # 词元与门牌号相似度、候选判定
-│   ├── experiments.py     # 规则 A/B 对照实验：逐档运行、差异分析与持久化
+│   ├── experiments.py     # 规则 A/B 对照实验：逐档运行、差异分析与持久化；历史回归对比（对齐/分类/汇总）
 │   ├── consensus.py       # 复核共识记忆：历史复核聚合与自动指向
 │   ├── review_groups.py   # 同案合并复核：归组与整组事务写入
 │   ├── ingest.py          # CSV / JSON 标准地址导入

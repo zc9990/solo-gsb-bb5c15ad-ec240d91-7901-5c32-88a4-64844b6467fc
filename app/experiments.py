@@ -45,6 +45,10 @@ class ExperimentValidationError(Exception):
         super().__init__("experiment validation failed")
 
 
+class ExperimentNotFoundError(Exception):
+    """One of the two experiments selected for comparison does not exist."""
+
+
 # ---------------------------------------------------------------- validation --
 
 
@@ -437,4 +441,253 @@ def serialize_experiment_summary(row: sqlite3.Row) -> dict[str, Any]:
         "profiles": json.loads(row["profiles_json"]),
         "query_count": len(json.loads(row["queries_json"])),
         "summary": json.loads(row["summary_json"]),
+    }
+
+
+# ------------------------------------------- historical regression comparison --
+#
+# Two persisted experiments are aligned **by profile name** and **by query
+# stripped of leading/trailing whitespace**.  An experiment whose profile names
+# do not cover the other side (missing profiles) or that contains duplicate
+# stripped queries is rejected item-by-item and nothing is compared.  Each
+# aligned (query, profile) cell is then classified:
+#
+# * ``improved``   -- status moved up (no_match < needs_review < auto_matched)
+# * ``regressed``  -- status moved down, or the status stayed equal but the
+#                     preferred address changed (without ground truth a flipped
+#                     best address cannot be called an improvement, so it is
+#                     conservatively counted as a regression)
+# * ``score_only`` -- same status and same preferred address, different score
+# * ``unchanged``  -- status, preferred address and score all identical
+#
+# When the two experiments were recorded against different address-table
+# snapshot digests the result is flagged as not directly comparable, but the
+# per-cell differences are still computed and returned.
+
+CAT_IMPROVED = "improved"
+CAT_REGRESSED = "regressed"
+CAT_SCORE_ONLY = "score_only"
+CAT_UNCHANGED = "unchanged"
+COMPARE_CATEGORIES = (CAT_IMPROVED, CAT_REGRESSED, CAT_SCORE_ONLY, CAT_UNCHANGED)
+
+CATEGORY_LABELS = {
+    CAT_IMPROVED: "改善",
+    CAT_REGRESSED: "退化",
+    CAT_SCORE_ONLY: "仅分数变化",
+    CAT_UNCHANGED: "无变化",
+}
+
+_STATUS_LABELS = {
+    "auto_matched": "自动命中",
+    "needs_review": "待确认",
+    "no_match": "无匹配",
+}
+
+# Higher rank = better conclusion; unknown statuses rank below everything.
+_STATUS_RANK = {"no_match": 0, "needs_review": 1, "auto_matched": 2}
+
+
+def _duplicates(items: list[str]) -> list[str]:
+    """Values appearing more than once, in first-repeat order."""
+    seen: set[str] = set()
+    dups: list[str] = []
+    for item in items:
+        if item in seen and item not in dups:
+            dups.append(item)
+        seen.add(item)
+    return dups
+
+
+def _classify_cell(base: dict[str, Any], target: dict[str, Any]
+                   ) -> tuple[str, str]:
+    """Classify one aligned (query, profile) pair; see module notes above."""
+    b_status, t_status = base["status"], target["status"]
+    b_rank = _STATUS_RANK.get(b_status, -1)
+    t_rank = _STATUS_RANK.get(t_status, -1)
+    b_label = _STATUS_LABELS.get(b_status, b_status)
+    t_label = _STATUS_LABELS.get(t_status, t_status)
+    if t_rank > b_rank:
+        return CAT_IMPROVED, f"状态改善：{b_label} → {t_label}"
+    if t_rank < b_rank:
+        return CAT_REGRESSED, f"状态退化：{b_label} → {t_label}"
+    if base["best_id"] != target["best_id"]:
+        return CAT_REGRESSED, (
+            f"状态相同（{b_label}）但首选地址变化："
+            f"#{base['best_id'] if base['best_id'] is not None else '—'} → "
+            f"#{target['best_id'] if target['best_id'] is not None else '—'}"
+        )
+    if base["best_score"] != target["best_score"]:
+        return CAT_SCORE_ONLY, (
+            f"状态与首选地址不变，仅得分变化："
+            f"{base['best_score']} → {target['best_score']}"
+        )
+    return CAT_UNCHANGED, "状态、首选地址与得分完全一致"
+
+
+def _cell_side(pr: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": pr["status"],
+        "best_id": pr["best_id"],
+        "best_score": pr["best_score"],
+    }
+
+
+def compare_experiments(conn: sqlite3.Connection, body: Any) -> dict[str, Any]:
+    """Compare two persisted experiments cell-by-cell.
+
+    Raises :class:`ExperimentValidationError` (item-by-item ``errors``) when
+    the request is malformed, profile names do not align, or either experiment
+    contains duplicate stripped queries; raises
+    :class:`ExperimentNotFoundError` when either experiment id is unknown.
+    The comparison itself is a pure derivation -- nothing is persisted.
+    """
+    errors: list[dict[str, Any]] = []
+    if not isinstance(body, dict):
+        raise ExperimentValidationError(
+            [_err("request", None, None, "请求体必须是 JSON 对象")])
+
+    base_id = body.get("base_id")
+    target_id = body.get("target_id")
+    if not isinstance(base_id, str) or not base_id.strip():
+        errors.append(_err("base_id", None, None,
+                           "base_id 必须是基准实验编号（非空字符串）"))
+    if not isinstance(target_id, str) or not target_id.strip():
+        errors.append(_err("target_id", None, None,
+                           "target_id 必须是对比实验编号（非空字符串）"))
+    if errors:
+        raise ExperimentValidationError(errors)
+    base_id = base_id.strip()
+    target_id = target_id.strip()
+    if base_id == target_id:
+        raise ExperimentValidationError([_err(
+            "request", None, None,
+            "基准与对比实验编号相同，请选择两次不同的实验")])
+
+    base_row = db.get_ab_experiment(conn, base_id)
+    target_row = db.get_ab_experiment(conn, target_id)
+    missing = []
+    if base_row is None:
+        missing.append(f"基准实验 {base_id}")
+    if target_row is None:
+        missing.append(f"对比实验 {target_id}")
+    if missing:
+        raise ExperimentNotFoundError("实验不存在：" + "、".join(missing))
+
+    base = serialize_experiment(base_row)
+    target = serialize_experiment(target_row)
+
+    # -- alignment validation: profiles by name, queries by stripped text ----
+    base_names = [p["name"] for p in base["profiles"]]
+    target_names = [p["name"] for p in target["profiles"]]
+    for side, names in (("base", base_names), ("target", target_names)):
+        side_label = "基准" if side == "base" else "对比"
+        for dup in _duplicates(names):
+            errors.append({**_err("profiles", None, None,
+                                  f"{side_label}实验档案名称重复：“{dup}”，"
+                                  f"无法按名称对齐"),
+                           "side": side})
+    only_in_base_names = [n for n in base_names if n not in target_names]
+    only_in_target_names = [n for n in target_names if n not in base_names]
+    if only_in_target_names:
+        errors.append(_err("profiles", None, None,
+                           "基准实验缺少档案：" +
+                           "、".join(f"“{n}”" for n in only_in_target_names)))
+    if only_in_base_names:
+        errors.append(_err("profiles", None, None,
+                           "对比实验缺少档案：" +
+                           "、".join(f"“{n}”" for n in only_in_base_names)))
+
+    # Queries align on the stripped text; persisted queries are already
+    # stripped at submission time, but rows written by other means may not be.
+    base_queries = [q.strip() for q in base["queries"]]
+    target_queries = [q.strip() for q in target["queries"]]
+    for side, queries in (("base", base_queries), ("target", target_queries)):
+        side_label = "基准" if side == "base" else "对比"
+        for dup in _duplicates(queries):
+            errors.append({**_err("queries", None, None,
+                                  f"{side_label}实验存在重复查询"
+                                  f"（去首尾空白后）：“{dup}”，无法逐条对齐"),
+                           "side": side})
+    if errors:
+        raise ExperimentValidationError(errors)
+
+    # -- per-cell comparison ---------------------------------------------------
+    def _index_results(exp: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {r["query"].strip(): r for r in exp["results"]}
+
+    base_results = _index_results(base)
+    target_results = _index_results(target)
+
+    base_qset = set(base_queries)
+    target_qset = set(target_queries)
+    common_queries = [q for q in base_queries if q in target_qset]
+    queries_only_in_base = [q for q in base_queries if q not in target_qset]
+    queries_only_in_target = [q for q in target_queries if q not in base_qset]
+
+    counts = {cat: 0 for cat in COMPARE_CATEGORIES}
+    cells: list[dict[str, Any]] = []
+    for query in common_queries:
+        base_by_name = {pr["profile"]: pr
+                        for pr in base_results[query]["profiles"]}
+        target_by_name = {pr["profile"]: pr
+                          for pr in target_results[query]["profiles"]}
+        for name in base_names:  # aligned profiles, in base experiment order
+            b = base_by_name[name]
+            t = target_by_name[name]
+            category, reason = _classify_cell(b, t)
+            counts[category] += 1
+            b_score, t_score = b["best_score"], t["best_score"]
+            cells.append({
+                "query": query,
+                "profile": name,
+                "category": category,
+                "category_label": CATEGORY_LABELS[category],
+                "reason": reason,
+                "base": _cell_side(b),
+                "target": _cell_side(t),
+                "score_delta": (
+                    round(t_score - b_score, 4)
+                    if b_score is not None and t_score is not None else None
+                ),
+            })
+
+    base_snapshot = base["table_snapshot"]
+    target_snapshot = target["table_snapshot"]
+    comparable = base_snapshot.get("digest") == target_snapshot.get("digest")
+
+    return {
+        "base": {
+            "id": base["id"],
+            "created_at": base["created_at"],
+            "profiles": base_names,
+            "query_count": len(base_queries),
+            "table_snapshot": base_snapshot,
+        },
+        "target": {
+            "id": target["id"],
+            "created_at": target["created_at"],
+            "profiles": target_names,
+            "query_count": len(target_queries),
+            "table_snapshot": target_snapshot,
+        },
+        "aligned_profiles": list(base_names),
+        "queries": {
+            "common": len(common_queries),
+            "only_in_base": queries_only_in_base,
+            "only_in_target": queries_only_in_target,
+        },
+        "snapshot": {
+            "comparable": comparable,
+            "base_digest": base_snapshot.get("digest"),
+            "target_digest": target_snapshot.get("digest"),
+            "note": None if comparable else (
+                "两次实验的地址表快照 digest 不同，结论差异可能来自地址表本身的"
+                "变化而非规则调整，结果不可直接比较（以下逐条差异仍按原文展示）"
+            ),
+        },
+        "summary": {
+            "total_cells": len(cells),
+            **counts,
+        },
+        "cells": cells,
     }

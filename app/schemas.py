@@ -86,3 +86,13 @@ class ExperimentRequest(BaseModel):
     queries: list[constr(strip_whitespace=True, min_length=1)] = Field(
         ..., min_length=1, max_length=100
     )
+
+
+class ExperimentCompareRequest(BaseModel):
+    """历史回归对比请求：两次已持久化实验的编号。"""
+    base_id: constr(strip_whitespace=True, min_length=1) = Field(
+        ..., description="基准实验编号（较早的一次，形如 EXP-...）"
+    )
+    target_id: constr(strip_whitespace=True, min_length=1) = Field(
+        ..., description="对比实验编号（较晚的一次，形如 EXP-...）"
+    )

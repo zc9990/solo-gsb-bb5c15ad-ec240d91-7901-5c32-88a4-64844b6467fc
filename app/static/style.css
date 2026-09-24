@@ -315,3 +315,47 @@ th { color: var(--muted); font-weight: 600; }
 #ab-history-card { margin-top: 14px; }
 .ab-open { color: var(--primary); text-decoration: none; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .ab-open:hover { text-decoration: underline; }
+
+/* ============================================ historical regression compare */
+
+.cmp-selectors { align-items: flex-end; }
+.cmp-sel { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 260px; }
+.cmp-sel span { font-size: 12px; color: var(--muted); }
+.cmp-sel select { width: 100%; }
+.cmp-pick { white-space: nowrap; }
+.cmp-pick .tiny.ghost { padding: 3px 8px; margin-right: 2px; }
+
+.cmp-result-inner { margin-top: 12px; }
+.cmp-warning {
+    margin: 10px 0; padding: 9px 12px; border-radius: 8px;
+    border-left: 3px solid var(--red);
+    background: var(--red-bg); color: var(--red); font-size: 13px;
+}
+.cmp-warning .muted { color: inherit; opacity: .8; }
+.cmp-unpaired {
+    margin: 10px 0; padding: 8px 12px; border-radius: 8px;
+    background: var(--amber-bg); color: var(--amber); font-size: 13px;
+}
+
+.cmp-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 12px 0; }
+.cmp-filter { background: var(--gray-bg); color: var(--ink); }
+.cmp-filter.active { outline: 2px solid var(--primary); font-weight: 700; }
+.cmp-filter-spacer { flex: 1; }
+
+.cmp-query {
+    border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; margin-top: 12px;
+}
+.cmp-query .query-line { font-weight: 600; margin-bottom: 6px; word-break: break-all; }
+.cmp-table th, .cmp-table td { white-space: nowrap; }
+.cmp-table td:last-child, .cmp-table .cmp-profile-cell { white-space: normal; }
+.cmp-profile-cell { font-weight: 600; min-width: 70px; }
+
+.cmp-cat {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.cmp-cat.improved { background: var(--green-bg); color: var(--green); }
+.cmp-cat.regressed { background: var(--red-bg); color: var(--red); }
+.cmp-cat.score_only { background: var(--amber-bg); color: var(--amber); }
+.cmp-cat.unchanged { background: var(--gray-bg); color: var(--muted); }
