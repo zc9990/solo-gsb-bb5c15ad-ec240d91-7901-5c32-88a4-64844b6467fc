@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>地址匹配 · Address Matcher</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+    <h1>地址匹配台 <span class="sub">Address Matcher</span></h1>
+    <div class="health">
+        <span id="health" class="badge">连接中…</span>
+        <a href="/docs" target="_blank" class="link">REST API 文档</a>
+    </div>
+</header>
+
+<nav class="tabs">
+    <button class="tab" data-tab="match">单条 / 批量匹配</button>
+    <button class="tab" data-tab="experiment">规则 A/B 实验</button>
+    <button class="tab" data-tab="table">标准地址表 <span id="addr-count" class="count"></span></button>
+    <button class="tab" data-tab="review">待确认队列 <span id="review-count" class="count"></span></button>
+</nav>
+
+<main>
+    <!-- ============================ matching ============================ -->
+    <section id="tab-match" class="panel active">
+        <div class="card">
+            <h2>外部地址输入</h2>
+            <p class="hint">每行一条地址；或直接粘贴一条。系统会自动统一 Unicode、大小写、道路缩写与门牌号格式。</p>
+            <textarea id="query" rows="4"
+                placeholder="例如：123 main street, New York, NY 10001"></textarea>
+            <div class="row">
+                <button id="btn-match" class="primary">开始匹配</button>
+                <button id="btn-demo" class="ghost">填充示例</button>
+                <span id="match-summary"></span>
+            </div>
+        </div>
+        <div id="results"></div>
+    </section>
+
+    <!-- ====================== rule A/B experiments ===================== -->
+    <section id="tab-experiment" class="panel">
+        <div class="card">
+            <h2>规则 A/B 对照实验</h2>
+            <p class="hint">
+                提交 2~4 个命名规则档案（自动命中 / 拒绝 / 分差阈值与词元权重）和 1~100 条查询，
+                服务端在<b>同一标准地址表快照</b>下逐档运行现有匹配器。档案参数非法或查询重复时逐项报错且不执行；
+                结果持久化，可按实验编号回看。
+            </p>
+            <div id="ab-profiles" class="ab-profiles"></div>
+            <div class="row">
+                <button id="btn-ab-add" class="ghost">＋ 增加一档（最多 4 档）</button>
+            </div>
+            <h2 class="ab-subtitle">实验查询</h2>
+            <textarea id="ab-queries" rows="4"
+                placeholder="每行一条查询，1~100 条，不可完全重复"></textarea>
+            <div class="row">
+                <button id="btn-ab-run" class="primary">开始对照实验</button>
+                <button id="btn-ab-demo" class="ghost">填充示例</button>
+                <span id="ab-run-summary"></span>
+            </div>
+            <div id="ab-errors"></div>
+        </div>
+        <div id="ab-result"></div>
+        <div class="card" id="ab-history-card">
+            <h2>历史实验</h2>
+            <div class="row">
+                <button id="btn-ab-refresh-history" class="ghost">刷新历史</button>
+                <span class="hint">点击编号回看完整结果</span>
+            </div>
+            <div id="ab-history"></div>
+        </div>
+    </section>
+
+    <!-- ====================== standard address table =================== -->
+    <section id="tab-table" class="panel">
+        <div class="card">
+            <h2>标准地址表</h2>
+            <div class="row wrap">
+                <input type="file" id="csv-file" accept=".csv" class="hidden-file">
+                <label for="csv-file" class="btn ghost-file">选择 CSV 文件</label>
+                <label class="inline-check">
+                    <input type="checkbox" id="csv-preview-mode" checked>
+                    上传前先预览确认
+                </label>
+                <button id="btn-sample" class="ghost">加载内置示例数据</button>
+                <button id="btn-refresh-table" class="ghost">刷新</button>
+                <span id="table-msg"></span>
+            </div>
+            <div id="csv-preview-panel" class="preview-panel hidden"></div>
+            <p class="hint">
+                CSV 支持的列名：<code>address</code>(或 full_address)、<code>line1</code>(street)、
+                <code>city</code>(town)、<code>state</code>(province)、
+                <code>postal_code</code>(zip/postcode)、<code>country</code>、
+                <code>external_id</code>(或 id)。
+                预览模式下先展示有效/重复/无效数量及无效行号，确认后仅写入有效记录；
+                取消勾选则沿用直接上传接口 <code>/api/addresses/upload</code>。
+            </p>
+            <div id="address-table-wrap" class="table-wrap"></div>
+        </div>
+    </section>
+
+    <!-- ========================== review queue ========================= -->
+    <section id="tab-review" class="panel">
+        <div class="card">
+            <h2>待确认队列</h2>
+            <div class="row">
+                <select id="review-filter">
+                    <option value="needs_review">仅待确认</option>
+                    <option value="">全部记录</option>
+                    <option value="reviewed">已复核</option>
+                    <option value="auto_matched">自动命中</option>
+                    <option value="no_match">无匹配</option>
+                </select>
+                <button id="btn-refresh-review" class="ghost">刷新</button>
+            </div>
+            <div id="review-groups"></div>
+            <div id="review-list"></div>
+        </div>
+    </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
