@@ -920,12 +920,12 @@ async function loadExperimentHistory() {
     const box = $("#ab-history");
     if (!box) return;
     try {
-        const data = await api("/api/experiments?limit=50");
+        const data = await api("/api/experiments?limit=200");
+        abHistoryItems = data.items || [];
         if (data.items.length === 0) {
             box.innerHTML = '<p class="muted">暂无实验记录。</p>';
-            return;
-        }
-        box.innerHTML = `<div class="table-wrap"><table>
+        } else {
+            box.innerHTML = `<div class="table-wrap"><table>
             <thead><tr><th>实验编号</th><th>提交时间</th><th>档案</th><th>查询</th><th>不一致</th></tr></thead>
             <tbody>${data.items.map((it) => `<tr>
                 <td><a href="#" class="ab-open" data-id="${escapeHtml(it.id)}">${escapeHtml(it.id)}</a></td>
@@ -936,7 +936,9 @@ async function loadExperimentHistory() {
                     `<span class="ab-flag">${it.summary.disagreement_count}</span>` :
                     '<span class="ab-flag agree">0</span>'}</td>
             </tr>`).join("")}</tbody></table></div>
-            ${data.total > 50 ? `<p class="muted">共 ${data.total} 个实验，仅显示最近 50 个</p>` : ""}`;
+            ${data.total > 200 ? `<p class="muted">共 ${data.total} 个实验，仅显示最近 200 个</p>` : ""}`;
+        }
+        renderRegressionSelects();
     } catch (err) {
         box.innerHTML = `<p class="err-msg">${escapeHtml(err.message)}</p>`;
     }
@@ -954,5 +956,195 @@ $("#ab-history").addEventListener("click", async (event) => {
         window.scrollTo({ top: $("#ab-result").offsetTop - 60, behavior: "smooth" });
     } catch (err) {
         alert(err.message);
+    }
+});
+
+// ================================================== historical regression
+//
+// Compare two persisted experiments: profiles are paired by name and queries
+// by their stripped text.  The report is rendered once; the category filter
+// and CSV download work purely on that cached report.
+
+let abHistoryItems = [];
+let regressionReport = null;
+let regressionFilter = "all";
+
+const RG_CATEGORY_ORDER = ["regressed", "improved", "score_only", "unchanged"];
+
+function experimentOptionLabel(it) {
+    const profiles = it.profiles.map((p) => p.name).join("/");
+    return `${it.id} · ${it.created_at} · ${profiles} · ${it.query_count} 条查询`;
+}
+
+function renderRegressionSelects() {
+    const previous = { base: $("#rg-base")?.value, candidate: $("#rg-candidate")?.value };
+    const options = '<option value="">— 请选择 —</option>' +
+        abHistoryItems.map((it) =>
+            `<option value="${escapeHtml(it.id)}">${escapeHtml(experimentOptionLabel(it))}</option>`
+        ).join("");
+    $("#rg-base").innerHTML = options;
+    $("#rg-candidate").innerHTML = options;
+    if (previous.base) $("#rg-base").value = previous.base;
+    if (previous.candidate) $("#rg-candidate").value = previous.candidate;
+}
+
+function renderRegressionErrors(errors) {
+    if (!errors || errors.length === 0) {
+        $("#rg-errors").innerHTML = "";
+        return;
+    }
+    const items = errors.map((e) => {
+        const side = e.side === "base" ? "基准侧" : e.side === "candidate" ? "候选侧" : "";
+        const where = e.type === "profile"
+            ? `档案${e.index !== null && e.index !== undefined ? `（第 ${e.index + 1} 档）` : ""}${side}`
+            : e.type === "query"
+                ? `查询${e.index !== null && e.index !== undefined ? `（第 ${e.index + 1} 条）` : ""}${side}`
+                : "请求";
+        return `<li><b>${escapeHtml(where)}</b>：${escapeHtml(e.message)}</li>`;
+    }).join("");
+    $("#rg-errors").innerHTML =
+        `<div class="ab-errors"><div class="ab-errors-head">⛔ 无法对比（共 ${errors.length} 项）：</div><ul>${items}</ul></div>`;
+}
+
+function renderSideCell(side) {
+    const bestText = side.best_text
+        ? `<div class="muted rg-best-text">${escapeHtml(side.best_text)}</div>` : "";
+    return `
+        <div class="rg-side">
+            <span class="status ${side.status}">${STATUS_LABEL[side.status] || side.status}</span>
+            <div class="rg-best">首选 #${side.best_id ?? "—"} · ${side.best_score === null ? "—" : pct(side.best_score)}</div>
+            ${bestText}
+        </div>`;
+}
+
+function renderRegressionReport() {
+    const report = regressionReport;
+    if (!report) {
+        $("#rg-result").innerHTML = "";
+        return;
+    }
+    const byQuery = report.summary.by_query;
+    const byCell = report.summary.by_cell;
+
+    const chips = [
+        { key: "all", label: "全部", count: report.query_count },
+        ...RG_CATEGORY_ORDER.map((key) => ({
+            key, label: byQuery[key].label, count: byQuery[key].count,
+        })),
+    ].map((chip) => `
+        <button type="button" class="rg-chip ${chip.key}${regressionFilter === chip.key ? " active" : ""}"
+                data-rg-filter="${chip.key}">
+            ${chip.label} ${chip.count}
+        </button>`).join("");
+
+    const warning = report.snapshots_comparable ? "" : `
+        <div class="rg-warning">
+            ⚠ ${escapeHtml(report.warning)}
+        </div>`;
+
+    const rows = report.rows
+        .filter((row) => regressionFilter === "all" || row.category === regressionFilter)
+        .map((row) => {
+            const cells = row.cells.map((cell) => {
+                const dimmed = regressionFilter !== "all" && cell.category !== regressionFilter;
+                return `
+                <div class="rg-cell ${cell.category}${dimmed ? " dimmed" : ""}">
+                    <div class="rg-cell-head">
+                        <span class="rg-cell-name">${escapeHtml(cell.profile)}</span>
+                        <span class="rg-chip ${cell.category}">${cell.category_label}</span>
+                    </div>
+                    <div class="rg-sides">
+                        ${renderSideCell(cell.base)}
+                        <span class="rg-arrow">→</span>
+                        ${renderSideCell(cell.candidate)}
+                    </div>
+                    ${cell.notes.length ? `<div class="rg-notes">${cell.notes.map(escapeHtml).join("；")}</div>` : ""}
+                </div>`;
+            }).join("");
+            return `
+            <div class="rg-row" data-category="${row.category}">
+                <div class="query-line">
+                    <span class="rg-chip ${row.category}">${row.category_label}</span>
+                    #${row.base_index + 1} ${escapeHtml(row.query)}
+                </div>
+                <div class="rg-cells">${cells}</div>
+            </div>`;
+        }).join("");
+
+    const csvQuery = new URLSearchParams({
+        base_experiment_id: report.base.id,
+        candidate_experiment_id: report.candidate.id,
+    });
+    if (regressionFilter !== "all") csvQuery.set("category", regressionFilter);
+
+    $("#rg-result").innerHTML = `
+        <div class="rg-report">
+            <div class="rg-head">
+                <div>
+                    <b>基准</b> <span class="ab-eid">${escapeHtml(report.base.id)}</span>
+                    <span class="muted">${escapeHtml(report.base.created_at)} · 快照 ${report.base.table_snapshot.count} 条</span>
+                </div>
+                <div>
+                    <b>候选</b> <span class="ab-eid">${escapeHtml(report.candidate.id)}</span>
+                    <span class="muted">${escapeHtml(report.candidate.created_at)} · 快照 ${report.candidate.table_snapshot.count} 条</span>
+                </div>
+            </div>
+            ${warning}
+            <div class="rg-summary">
+                <div class="rg-sum-title">按查询汇总（该查询下最严重的变化分类）：</div>
+                <div class="rg-chips">${chips}</div>
+                <div class="muted">
+                    按档案逐条汇总：${RG_CATEGORY_ORDER.map((key) =>
+                        `${byCell[key].label} <b>${byCell[key].count}</b>`).join(" · ")}
+                </div>
+                <div class="row">
+                    <a class="btn ghost" id="btn-rg-csv"
+                       href="/api/experiments/compare/csv?${csvQuery.toString()}">
+                        ⬇ 下载 CSV${regressionFilter !== "all" ?
+                            `（仅 ${byQuery[regressionFilter].label}）` : ""}
+                    </a>
+                </div>
+            </div>
+            ${rows || '<p class="muted">当前分类下没有查询。</p>'}
+        </div>`;
+}
+
+$("#rg-result").addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-rg-filter]");
+    if (!chip) return;
+    regressionFilter = chip.dataset.rgFilter;
+    renderRegressionReport();
+});
+
+$("#btn-rg-run").addEventListener("click", async () => {
+    const base_experiment_id = $("#rg-base").value;
+    const candidate_experiment_id = $("#rg-candidate").value;
+    $("#rg-errors").innerHTML = "";
+    $("#rg-result").innerHTML = "";
+    const btn = $("#btn-rg-run");
+    btn.disabled = true;
+    try {
+        const res = await fetch("/api/experiments/compare", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ base_experiment_id, candidate_experiment_id }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            renderRegressionErrors(data.errors || [{
+                type: "request", side: null, index: null, field: null,
+                message: data.detail || "请求失败",
+            }]);
+            return;
+        }
+        regressionReport = data;
+        regressionFilter = "all";
+        renderRegressionReport();
+    } catch (err) {
+        renderRegressionErrors([{
+            type: "request", side: null, index: null, field: null, message: err.message,
+        }]);
+    } finally {
+        btn.disabled = false;
     }
 });

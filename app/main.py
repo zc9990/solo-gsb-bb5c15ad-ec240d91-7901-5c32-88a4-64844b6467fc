@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import consensus, db, experiments, ingest, review_groups
+from . import consensus, db, experiments, ingest, regressions, review_groups
 from .config import Settings, get_settings
 from .matcher import candidate_to_dict, match_address, result_to_dict
 from .schemas import (
@@ -20,6 +20,7 @@ from .schemas import (
     ExperimentRequest,
     GroupReviewAction,
     MatchRequest,
+    RegressionCompareRequest,
     ReviewAction,
 )
 
@@ -86,6 +87,9 @@ def _custom_openapi() -> dict[str, Any]:
     # Nested models (RuleProfile) land in $defs; hoist them next to the others.
     components.update(full.pop("$defs", {}))
     components["ExperimentRequest"] = full
+    components["RegressionCompareRequest"] = (
+        RegressionCompareRequest.model_json_schema(
+            ref_template="#/components/schemas/{model}"))
     app.openapi_schema = schema
     return schema
 
@@ -457,6 +461,76 @@ def list_experiments(limit: int = 50, offset: int = 0,
         "total": db.count_ab_experiments(conn),
         "items": [experiments.serialize_experiment_summary(r) for r in rows],
     }
+
+
+# --- historical regression comparison ---------------------------------------
+
+
+# Registered before the ``{experiment_id}`` path route below so the literal
+# "compare/csv" segment is not captured as an experiment id.
+@app.get("/api/experiments/compare/csv")
+def compare_experiments_csv(
+    base_experiment_id: str,
+    candidate_experiment_id: str,
+    category: str | None = None,
+    conn: db.sqlite3.Connection = Depends(get_conn),
+) -> Response:
+    """两次历史实验的回归对比 CSV 下载（可按分类过滤逐档行）。"""
+    if category is not None and category not in regressions.CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法 category 过滤值，可选：{'/'.join(regressions.CATEGORIES)}")
+    try:
+        report = regressions.build_comparison(
+            conn, {"base_experiment_id": base_experiment_id,
+                   "candidate_experiment_id": candidate_experiment_id})
+    except regressions.RegressionValidationError as exc:
+        # Missing experiments are really 404s; alignment problems stay 400.
+        status = 404 if all(e["type"] == "experiment" for e in exc.errors) else 400
+        raise HTTPException(status_code=status, detail="；".join(
+            e["message"] for e in exc.errors)) from exc
+    csv_text = regressions.comparison_csv(report, category)
+    # UTF-8 BOM so Excel opens Chinese columns without mojibake.
+    return Response(
+        content="﻿" + csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="regression-{base_experiment_id}-vs-'
+                f'{candidate_experiment_id}.csv"'
+        },
+    )
+
+
+@app.post(
+    "/api/experiments/compare",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/RegressionCompareRequest"}
+                }
+            },
+        },
+    },
+)
+def compare_experiments(payload: dict[str, Any] = Body(...),
+                        conn: db.sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """历史回归对比：选择两个已持久化实验，按档案名称与去空白查询对齐后逐档比较。
+
+    缺失档案、缺失/多余/重复查询逐项返回 ``errors`` 且不产出对比；
+    两次实验地址表快照 digest 不同时仍返回逐条差异，但标记
+    ``snapshots_comparable=false`` 提示不可直接比较。
+    """
+    try:
+        return regressions.build_comparison(conn, payload)
+    except regressions.RegressionValidationError as exc:
+        status = 404 if all(e["type"] == "experiment" for e in exc.errors) else 400
+        return JSONResponse(
+            status_code=status,
+            content={"detail": "回归对比参数校验失败", "errors": exc.errors},
+        )
 
 
 @app.get("/api/experiments/{experiment_id}")

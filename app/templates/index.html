@@ -63,6 +63,32 @@
             <div id="ab-errors"></div>
         </div>
         <div id="ab-result"></div>
+        <div class="card" id="ab-regression-card">
+            <h2>历史回归对比</h2>
+            <p class="hint">
+                选择两个<b>已持久化实验</b>（基准 / 候选），服务端按<b>档案名称</b>与
+                <b>去首尾空白后的查询</b>对齐，逐档比较状态或首选地址变化，分类为
+                <span class="rg-chip improved">改善</span>
+                <span class="rg-chip regressed">退化</span>
+                <span class="rg-chip score-only">仅分数变化</span>
+                <span class="rg-chip unchanged">无变化</span>。
+                缺少档案或查询不一致时逐项报错；两次实验地址表快照不同会提示不可直接比较但仍展示逐条差异。
+            </p>
+            <div class="ab-reg-form">
+                <label class="ab-reg-select">
+                    <span>基准实验（旧）</span>
+                    <select id="rg-base"><option value="">— 请选择 —</option></select>
+                </label>
+                <span class="ab-reg-arrow">→</span>
+                <label class="ab-reg-select">
+                    <span>候选实验（新）</span>
+                    <select id="rg-candidate"><option value="">— 请选择 —</option></select>
+                </label>
+                <button id="btn-rg-run" class="primary">开始回归对比</button>
+            </div>
+            <div id="rg-errors"></div>
+            <div id="rg-result"></div>
+        </div>
         <div class="card" id="ab-history-card">
             <h2>历史实验</h2>
             <div class="row">

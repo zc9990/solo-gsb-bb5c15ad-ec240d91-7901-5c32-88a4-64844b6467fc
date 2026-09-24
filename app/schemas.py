@@ -86,3 +86,13 @@ class ExperimentRequest(BaseModel):
     queries: list[constr(strip_whitespace=True, min_length=1)] = Field(
         ..., min_length=1, max_length=100
     )
+
+
+class RegressionCompareRequest(BaseModel):
+    """历史回归对比请求：选择两个已持久化的实验（基准 / 候选）。"""
+    base_experiment_id: constr(strip_whitespace=True, min_length=1) = Field(
+        ..., description="基准实验编号（旧结果）"
+    )
+    candidate_experiment_id: constr(strip_whitespace=True, min_length=1) = Field(
+        ..., description="候选实验编号（新结果）"
+    )

@@ -6,8 +6,9 @@
 过小的候选会被标记为 **待确认（needs_review）**，并在界面上展示命中词元、冲突字段与
 可复核结果。
 
-- 🌐 网页界面：单条/批量匹配、**规则 A/B 对照实验**、上传标准地址 CSV、待确认队列人工复核（含同案合并复核、复核共识记忆）
+- 🌐 网页界面：单条/批量匹配、**规则 A/B 对照实验**、**历史回归对比**、上传标准地址 CSV、待确认队列人工复核（含同案合并复核、复核共识记忆）
 - 🧪 **规则 A/B 对照实验**：提交 2～4 个命名规则档案（自动命中/拒绝/分差阈值 + 词元权重）与 1～100 条查询，在同一地址表快照下逐档运行，逐条对比状态/首选/得分/候选差异并标出不一致与触发阈值，结果按实验编号持久化回看
+- 📉 **历史回归对比**：任选两个已持久化实验（基准 / 候选），服务端按**档案名称**与**去首尾空白后的查询**自动对齐，逐档把变化分类为**改善 / 退化 / 仅分数变化 / 无变化**并汇总计数；快照 digest 不同会提示不可直接比较但仍展示逐条差异，页面支持按类别筛选与 CSV 下载
 - 🔌 REST API：`/api/match`、`/api/match/batch`、`/api/addresses`、复核接口、A/B 实验接口（含 `/docs` Swagger）
 - 🗄️ SQLite 持久化，零外部依赖，数据通过 Docker volume 保存
 - 🌍 归一化：NFKC + 变音符折叠 + 繁简中文映射 + 全角字符、道路缩写（St/Rd/Ave…）、门牌号（`#12-B`/`No.12b`/`12号`）
@@ -203,6 +204,78 @@ curl -s -X POST http://localhost:8000/api/experiments \
 #      {"type":"query","index":1,"field":null,"message":"查询与第 1 条完全重复：…"}, ...]}
 ```
 
+---
+
+## 历史回归对比
+
+调过阈值/权重并重新提交实验后，可在 **「规则 A/B 实验」** 标签下方的
+**「历史回归对比」** 卡片中选择两个**已持久化实验**（基准 = 旧结果，候选 = 新结果），
+服务端读取两份已保存的结果文档进行对齐与逐档比较，**不重新运行匹配、不写任何新数据**。
+
+**对齐规则（严格，缺一不可）**：
+
+- 档案按 **名称（去首尾空白）** 配对，基准或候选任一侧缺少同名档案都会逐项报错；
+- 查询按 **去首尾空白后的原文** 配对（区分大小写，`" Main St "` 与 `"Main St"` 视为同一条），
+  任一侧缺失 / 多出查询，或同一实验内查询重复，都会按 `档案/查询 + 侧（基准/候选）+ 序号`
+  列在 `errors` 中返回 `400`，不产出对比；
+- 实验编号不存在返回 `404`，基准与候选是同一个实验返回 `400`。
+
+**逐档变化分类**（同一条查询 × 同一名称档案，基准 → 候选）：
+
+| 分类 | 判定 |
+| --- | --- |
+| **改善** `improved` | 状态沿 `无匹配 → 待确认 → 自动命中` 方向变好 |
+| **退化** `regressed` | 状态反向变差；或状态不变但**首选地址 ID 改变**（无匹配状态下的低分首选除外） |
+| **仅分数变化** `score_only` | 状态与首选地址都相同，仅首选得分变化 |
+| **无变化** `unchanged` | 状态、首选地址、得分完全相同 |
+
+每条查询还会折叠出一个**查询级分类**（退化 > 改善 > 仅分数变化 > 无变化，取最严重者），
+汇总同时给出「按查询」与「按档案逐条（查询 × 档案）」两套计数。
+
+**快照 digest 不同**：两次实验可能运行在不同的标准地址表上。此时
+`snapshots_comparable=false` 并返回 `warning`（两侧行数也会展示），提示候选排名/得分
+**不可直接比较**；但逐档状态/首选/得分差异仍然照常计算与展示，供人工参考。
+
+页面提供「全部 / 退化 / 改善 / 仅分数变化 / 无变化」**类别筛选**（带计数），
+以及 **CSV 下载**（跟随当前筛选，UTF-8 BOM，Excel 可直接打开；每行 = 查询 × 档案）。
+
+```bash
+# 对比两个已持久化实验（JSON 报告）
+curl -s -X POST http://localhost:8000/api/experiments/compare \
+  -H 'Content-Type: application/json' \
+  -d '{"base_experiment_id": "EXP-20260924T075404-358e3e3e",
+       "candidate_experiment_id": "EXP-20260924T080112-9c1b7d20"}'
+# => {
+#      "base":      {"id": "…", "table_snapshot": {"count": 15, "digest": "…"}},
+#      "candidate": {"id": "…", "table_snapshot": {"count": 16, "digest": "…"}},
+#      "profiles": ["基线A", "激进B"],
+#      "query_count": 3,
+#      "snapshots_comparable": false,
+#      "warning": "两次实验的标准地址表快照 digest 不同…不可直接比较；以下逐条差异仍然展示…",
+#      "summary": {"by_cell":  {"improved": {"count": 1, ...}, "regressed": {...},
+#                               "score_only": {...}, "unchanged": {...}},
+#                  "by_query": {…同四分类，按查询折叠计数…}},
+#      "rows": [
+#        {"query": "1010 Lake Dr, Austin TX", "category": "improved",
+#         "counts": {"improved": 1, "regressed": 0, "score_only": 0, "unchanged": 1},
+#         "cells": [
+#           {"profile": "基线A", "category": "improved",
+#            "base":      {"status": "needs_review", "best_id": 5, "best_score": 0.7864,
+#                          "best_text": "1000 Lake Drive"},
+#            "candidate": {"status": "auto_matched", "best_id": 5, "best_score": 0.7864,
+#                          "best_text": "1000 Lake Drive"},
+#            "notes": ["状态 待确认 → 自动命中"]}]}]}
+
+# CSV 下载（可选 category=improved|regressed|score_only|unchanged 过滤）
+curl -s -G http://localhost:8000/api/experiments/compare/csv \
+  --data-urlencode base_experiment_id=EXP-20260924T075404-358e3e3e \
+  --data-urlencode candidate_experiment_id=EXP-20260924T080112-9c1b7d20 \
+  --data-urlencode category=regressed -o regression.csv
+
+# 缺少档案/查询 -> 400，errors 逐项列出（侧 + 序号 + 原因）
+# 实验编号不存在 -> 404
+```
+
 CSV 支持的列名（均可识别别名，表头大小写不敏感）：
 
 | 标准列 | 可识别别名 |
@@ -353,6 +426,8 @@ curl -s -X POST http://localhost:8000/api/review-groups/review \
 | POST | `/api/experiments` | 提交规则 A/B 对照实验（2~4 档案 × 1~100 查询，同一快照逐档运行；非法参数/重复查询逐项报错且不执行） |
 | GET | `/api/experiments` | 历史实验列表（编号、档案、查询数、各档计数与不一致数） |
 | GET | `/api/experiments/{id}` | 按实验编号回看完整结果（档案、查询、快照、逐档结果与候选差异） |
+| POST | `/api/experiments/compare` | 历史回归对比：两个已持久化实验按档案名/去空白查询对齐，逐档分类改善/退化/仅分数变化/无变化；缺档案或缺查询逐项 400，实验不存在 404 |
+| GET | `/api/experiments/compare/csv` | 回归对比 CSV 下载（`base_experiment_id`、`candidate_experiment_id`，可选 `category` 过滤） |
 | GET | `/api/matches?status=needs_review` | 匹配记录/待确认队列 |
 | GET | `/api/matches/{id}` | 单条匹配详情 |
 | POST | `/api/matches/{id}/review` | 单条复核：confirmed / overridden / rejected |
@@ -400,6 +475,7 @@ curl -s -X POST http://localhost:8000/api/review-groups/review \
 │   ├── normalization.py   # Unicode/缩写/门牌号归一化与分词
 │   ├── matcher.py         # 词元与门牌号相似度、候选判定
 │   ├── experiments.py     # 规则 A/B 对照实验：逐档运行、差异分析与持久化
+│   ├── regressions.py     # 历史回归对比：两次已持久化实验对齐、分类与 CSV
 │   ├── consensus.py       # 复核共识记忆：历史复核聚合与自动指向
 │   ├── review_groups.py   # 同案合并复核：归组与整组事务写入
 │   ├── ingest.py          # CSV / JSON 标准地址导入
